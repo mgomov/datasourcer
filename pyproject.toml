@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "datasourcer"
+version = "0.1.0"
+description = ""
+authors = ["Max G <mvgomov@ucdavis.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+requests = "^2.24.0"
+argparse = "^1.4.0"
+pathlib = "^1.0.1"
+typing = "^3.7.4"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+# data-spec-author='dataspec.bin.dataspec_author:run'
+# data-spec-gretrieve='dataspec.bin.dataspec_retrieve:run'
+dscer="datasourcer.bin.dscer:run"
