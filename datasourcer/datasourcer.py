@@ -10,7 +10,7 @@ import sys
 import time
 import zipfile
 from collections import deque, namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from glob import glob
@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import requests
+
+import marshalling as dscer_marshall
 
 logging.basicConfig(level=logging.INFO)
 
@@ -95,11 +97,17 @@ class Traversable:
     ) -> Optional["DatasetType"]:
         pass
 
+    def build_parent_path(self) -> Path:
+        pass
+
+    def build_path(self) -> Path:
+        pass
+
 
 class Downloadable:
     def download(
         self,
-        parent_dir: Path,
+        parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
@@ -126,32 +134,47 @@ def check_dict(key: str, d: Dict[str, Any], match_case: bool = False) -> Optiona
     return None
 
 
+@dataclass
+class DataContext:
+    root_path: Path
+
+
 # these dataclass definitions also define the layout of the input datasource JSON files
 @dataclass
 class File(Traversable, Downloadable):
     name: str
+    format_name: Optional[str]
     file_type: FileFormat
     retrieve_type: RetrieveType
     source: Optional[str]
-    path_name: Path
+    path: Path
     description: Optional[str]
     unzip: Optional[Path]
     create_type: CreateType
     retrieve: bool
     retain: bool
     template_types: Optional[List[TemplateType]]
-
     parent: "Directory"
 
+    def __repr__(self):
+        return f'File("{self.name}", source: {self.source})'
+
     # No traversal precedence (no nested structures here)
+    # TODO shouldn't be traversing past a file; if traverse_stack stil has elements, return error
     def traverse(
         self, traverse_stack: deque, match_case: bool = False
     ) -> Optional["DatasetType"]:
         return self
 
+    def build_parent_path(self) -> Path:
+        return self.parent.build_path()
+
+    def build_path(self) -> Path:
+        return self.build_parent_path() / self.path
+
     def download(
         self,
-        parent_dir: Path,
+        parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
@@ -168,7 +191,7 @@ class File(Traversable, Downloadable):
         # ) -> bool:
         # logging.info("Downloading file \"{}\"".format('\t' * level, file_spec.path_name))
 
-        level_info('Downloading file "{}"'.format(self.path_name), level)
+        level_info('Downloading file "{}"'.format(self.path), level)
 
         if self.retrieve_type == RetrieveType.GET:
             level_info("GET {}".format(self.source), level)
@@ -177,10 +200,13 @@ class File(Traversable, Downloadable):
                 level_info("No source specified; skipping file spec", level)
                 return False
 
+            if parent_dir is None:
+                parent_dir = self.build_parent_path()
+
             # make the directories leading up to this file, if they don't already exist
             os.makedirs(parent_dir, exist_ok=True)
 
-            file_path = Path(join(parent_dir, self.path_name))
+            file_path = Path(join(parent_dir, self.path))
 
             # request the headers here, with the accepted compression to be 'none' (so that chunking size lines up with content-length here)
             head = requests.head(
@@ -230,13 +256,21 @@ class File(Traversable, Downloadable):
 @dataclass
 class Directory(Traversable):
     name: str
-    path_name: Path
+    path: Path
     create_type: CreateType
     dirs: Dict[str, "Directory"]
     files: Dict[str, File]
-    type: DirectoryType
 
     parent: Union["Dataset", "Directory"]
+
+    def __repr__(self):
+        return f'Directory("{self.name}", Dirs: {list(self.dirs.keys())}, Files: {list(self.files.keys())})'
+
+    def build_parent_path(self) -> Path:
+        return self.parent.build_path()
+
+    def build_path(self) -> Path:
+        return self.build_parent_path() / self.path
 
     # Files first
     def traverse(
@@ -267,30 +301,55 @@ class Directory(Traversable):
 
     def download(
         self,
-        parent_dir: Path,
+        parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
     ) -> None:
-        dir_path = Path(join(parent_dir, self.path_name))
+        if parent_dir is None:
+            parent_dir = self.build_parent_path()
+
+        dir_path = Path(join(parent_dir, self.path))
 
         for subdir_name, subdir in self.dirs.items():
             # download_directory(dir_path, subdir, level=level + 1)
-            subdir.download(dir_path, level=level + 1)
+            try:
+                subdir.download(
+                    level=level + 1,
+                    validate_existing=validate_existing,
+                    reload_unconfirmable=reload_unconfirmable,
+                )
+            except TypeError as e:
+                print(e)
+                bp()
 
         for subfile_name, subfile in self.files.items():
             # download_file(dir_path, subfile, level=level + 1)
-            subfile.download(dir_path, level=level + 1)
+            subfile.download(
+                dir_path,
+                level=level + 1,
+                validate_existing=validate_existing,
+                reload_unconfirmable=reload_unconfirmable,
+            )
 
 
 @dataclass
 class RemoteDirectory(Traversable):
     name: str
-    path_name: Path
+    path: Path
     retrieve_type: RetrieveType
     source: str
 
     parent: Union["Dataset", Directory]
+
+    def __repr__(self):
+        return f'RemoteDirectory("{self.name}", source: self.source)'
+
+    def build_parent_path(self) -> Path:
+        return self.parent.build_path()
+
+    def build_path(self) -> Path:
+        return self.build_parent_path() / self.path
 
     def traverse(
         self, traverse_stack: deque, match_case: bool = False
@@ -305,7 +364,7 @@ class RemoteDirectory(Traversable):
 
     def download(
         self,
-        parent_dir: Path,
+        parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
@@ -318,8 +377,13 @@ class RemoteDirectory(Traversable):
         #     validate_existing: bool = True,
         #     reload_unconfirmable: bool = True,
         # ) -> None:
+
+        if parent_dir is None:
+            parent_dir = self.build_parent_path()
+
         if self.retrieve_type == RetrieveType.GET:
             level_error("Retrieve type GET not impl.; object: {}".format(self), level)
+
         elif self.retrieve_type == RetrieveType.FTP:
             url = urlparse(self.source)
             level_info(
@@ -328,6 +392,7 @@ class RemoteDirectory(Traversable):
                 ),
                 level,
             )
+
             os.makedirs(parent_dir, exist_ok=True)
 
             with ftplib.FTP(host=url.netloc) as ftp:
@@ -379,10 +444,20 @@ class RemoteDirectory(Traversable):
 @dataclass
 class Dataset(Traversable):
     name: str
+    path: Path
     description: Optional[str]
     org: Directory
 
     parent: "Datasource"
+
+    def __repr__(self):
+        return f'Dataset("{self.name}", Org: {self.org})'
+
+    def build_parent_path(self) -> Path:
+        return self.parent.build_path()
+
+    def build_path(self) -> Path:
+        return self.build_parent_path() / self.path
 
     def traverse(
         self, traverse_stack: deque, match_case: bool = False
@@ -391,27 +466,58 @@ class Dataset(Traversable):
         # forward the traversal to the (org)anization of the dataset (i.e. the dir)
         return self.org.traverse(traverse_stack, match_case=match_case)
 
-    def download(self, parent_dir: str, level: int = 0):
+    def download(
+        self,
+        parent_dir: Optional[Path] = None,
+        level: int = 0,
+        validate_existing: bool = True,
+        reload_unconfirmable: bool = True,
+    ):
         # def download_dataset(parent_dir: Path, dataset: Dataset, level: int = 1):
 
         logging.info('{}Downloading dataset "{}"'.format("\t" * level, self.name))
 
         # used to use the dataset name as a directory name directly, but instead this is specified in the org dir
         # dir_path = join(parent_dir, dataset.name)
+        if parent_dir is None:
+            parent_dir = self.build_parent_path()
+
         dir_path = parent_dir
 
         # download_directory(dir_path, dataset.org, level=level + 1)
-        self.org.download(dir_path, level=level + 1)
+        self.org.download(
+            dir_path,
+            level=level + 1,
+            validate_existing=validate_existing,
+            reload_unconfirmable=reload_unconfirmable,
+        )
 
 
 @dataclass
 class Datasource(Traversable):
     name: str
+    path: Path
     description: Optional[str]
     datasets: Dict[str, Dataset]
     datasources: Dict[str, "Datasource"]
 
+    data_context: DataContext
+
     parent: Optional["Datasource"]
+
+    def __repr__(self):
+        return f'Datasource("{self.name}", Datasets: {list(self.datasets.keys())}, Subsources: {list(self.datasources.keys())})'
+
+    def build_parent_path(self) -> Path:
+
+        if self.parent is None:
+            return self.data_context.root_path
+
+        elif self.parent is not None:
+            return self.build_parent_path()
+
+    def build_path(self):
+        return self.build_parent_path() / self.path
 
     def traverse(
         self, traverse_stack: deque, match_case: bool = False
@@ -438,16 +544,37 @@ class Datasource(Traversable):
 
         return None
 
-    def download(self, parent_dir: Path, level: int = 0):
+    def download(
+        self,
+        parent_dir: Optional[Path] = None,
+        level: int = 0,
+        validate_existing: bool = True,
+        reload_unconfirmable: bool = True,
+    ):
+        if parent_dir is None:
+            parent_dir = self.build_parent_path()
+
         ds_path = Path(join(parent_dir, self.name))
 
         logging.info('{}Downloading datasource "{}"'.format("\t" * level, self.name))
 
         for subsource_name, subsource in self.datasources.items():
-            subsource.download(ds_path, subsource, level=level + 1)
+            subsource.download(
+                ds_path,
+                subsource,
+                level=level + 1,
+                validate_existing=validate_existing,
+                reload_unconfirmable=reload_unconfirmable,
+            )
 
         for dataset_name, dataset in self.datasets.items():
-            dataset.download(ds_path, dataset, level=level + 1)
+            dataset.download(
+                ds_path,
+                dataset,
+                level=level + 1,
+                validate_existing=validate_existing,
+                reload_unconfirmable=reload_unconfirmable,
+            )
 
 
 DatasetType = Union[Datasource, Dataset, Directory, RemoteDirectory, File]
@@ -479,7 +606,7 @@ def check_validation_policy(
         level_info("Skipping download", level)
         return False
 
-    if exists and not is_valid:
+    if exists and is_valid is False:
         level_info("File exists, but isn't valid", level)
         return True
 
@@ -644,6 +771,7 @@ def parse_datasource_directory(dir: Path) -> dict:
     return {}
 
 
+# TODO support a more flexible qualifier system, e.g. with quotes? e.g., a.b."longer c.with.delimiters.as.part.of.identifier.kml".d
 def retrieve_by_qualifier(
     spec: DataCollection, qualifier: str, delimiter: str = ".", match_case: bool = False
 ) -> Tuple[str, Optional[DatasetType]]:
@@ -657,8 +785,44 @@ def retrieve_by_qualifier(
 
     have_first = check_dict(first, spec, match_case=match_case)
 
-    name, retrieved = spec.traverse(qual_stack, match_case=match_case)
+    if not have_first:
+        return None
 
-    print(name, retrieved)
+    if len(qual_stack) == 0:
+        return have_first
 
-    return (name, retrieved)
+    # name, retrieved = have_first.traverse(qual_stack, match_case=match_case)
+    retrieved = have_first.traverse(qual_stack, match_case=match_case)
+
+    print("retrieved:", retrieved)
+    bp()
+
+    return retrieved
+
+
+def datasources_from_dir(ds_dir: Path, data_dir: Path) -> Optional[DataCollection]:
+    def join_ds(fp, ds, ctx):
+        parsed_ds = dscer_marshall.parse_datasource_file(fp, ctx)
+
+        if parsed_ds is not None:
+            return {**ds, **parsed_ds}
+        else:
+            return False
+
+    d_ctx = DataContext(root_path=data_dir)
+
+    if exists(ds_dir) and isdir(ds_dir):
+        ds_dir_files = glob(join(ds_dir, "*.yml"))
+        logging.info(f"Found files in provided path: {ds_dir_files}")
+
+        for ds_file_path in ds_dir_files:
+            # = parse_datasource_file(ds_path)
+            datasources = join_ds(ds_file_path, datasources, d_ctx)
+
+        print("have datasources")
+        bp()
+    else:
+        logging.error(
+            f'Provided datasource file path does not exist or is not a file: "{ds_file_path}"'
+        )
+        return False

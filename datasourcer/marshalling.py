@@ -9,20 +9,30 @@ from pdb import set_trace as bp
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
+# import pyyaml
+import yaml
+
 import datasourcer.datasourcer as dscer
-from datasourcer.datasourcer import (CreateType, Dataset, Datasource,
-                                     Directory, DirectoryType, File,
-                                     FileFormat, RemoteDirectory, RetrieveType)
+from datasourcer.datasourcer import (CreateType, DataContext, Dataset,
+                                     Datasource, Directory, DirectoryType,
+                                     File, FileFormat, RemoteDirectory,
+                                     RetrieveType)
 
 
 def parse_datasource_spec(
-    ds_spec: dict, parent: Optional[Datasource]
+    name: str, ds_spec: dict, parent: Optional[Datasource], data_context: DataContext
 ) -> Optional[Datasource]:
     # ds_copy = Datasource(**copy.deepcopy(ds_spec))
     ds_copy = copy.deepcopy(ds_spec)
 
     try:
-        ds_obj = dscer.Datasource(**ds_copy, parent=parent)
+        ds_obj = dscer.Datasource(
+            name=name,
+            path=Path(name),
+            **ds_copy,
+            parent=parent,
+            data_context=data_context,
+        )
     except TypeError as e:
         logging.error(
             "Malformed datasource spec: {}\nObject: {}".format(
@@ -35,25 +45,27 @@ def parse_datasource_spec(
     datasets = {}
     for subset_name, subset_spec in ds_copy["datasets"].items():
         # ds_copy["datasets"][subset_name] = parse_dataset_spec(subset_spec)
-        datasets[subset_name] = parse_dataset_spec(subset_spec, ds_obj)
+        datasets[subset_name] = parse_dataset_spec(subset_name, subset_spec, ds_obj)
 
     ds_obj.datasets = datasets
 
     datasources = {}
     for subsource_name, subsource_spec in ds_copy["datasources"].items():
         # ds_copy["datasources"][subsource_name] = parse_datasource_spec(subsource_spec)
-        datasources[subsource_name] = parse_datasource_spec(subsource_spec, ds_obj)
+        datasources[subsource_name] = parse_datasource_spec(
+            subsource_name, subsource_spec, ds_obj, data_context
+        )
 
         ds_obj.datasources = datasources
 
     return ds_obj
 
 
-def parse_dataset_spec(ds_spec: dict, parent: Datasource):
+def parse_dataset_spec(name: str, ds_spec: dict, parent: Datasource):
     ds_copy = copy.deepcopy(ds_spec)
 
     try:
-        ds_obj = Dataset(**ds_copy, parent=parent)
+        ds_obj = Dataset(name=name, path=Path(name), **ds_copy, parent=parent)
     except TypeError as e:
         logging.error(
             "Malformed dataset spec: {}\nObject: {}".format(
@@ -64,13 +76,13 @@ def parse_dataset_spec(ds_spec: dict, parent: Datasource):
         return None
 
     # ds_copy["org"] = parse_dir_spec(ds_copy["org"])
-    ds_obj.org = parse_dir_spec(ds_copy["org"], ds_obj)
+    ds_obj.org = parse_dir_spec("data", ds_copy["org"], ds_obj)
 
     return ds_obj
 
 
 def parse_dir_spec(
-    dir_spec: dict, parent: Union[Dataset, Directory]
+    name: str, dir_spec: dict, parent: Union[Dataset, Directory]
 ) -> Union[None, Directory, RemoteDirectory]:
     ds_copy = copy.deepcopy(dir_spec)
 
@@ -78,6 +90,8 @@ def parse_dir_spec(
 
     try:
         ds_type = DirectoryType(ds_copy["type"])
+        # remove type from the dict; don't need it for unmarshalling past determining dir type
+        ds_copy.pop("type", None)
     except ValueError as e:
         logging.error(
             f"Directory type not specified or invalid (type string: '{ds_copy['type']}')"
@@ -90,7 +104,7 @@ def parse_dir_spec(
     if ds_type == DirectoryType.LOCAL:
 
         try:
-            dir_obj = Directory(**ds_copy, parent=parent)
+            dir_obj = Directory(name=name, path=Path(name), **ds_copy, parent=parent)
         except TypeError as e:
             logging.error(
                 "Malformed dir spec: {}\nObject: {}".format(
@@ -102,23 +116,23 @@ def parse_dir_spec(
 
         try:
             # ds_copy["create_type"] = CreateType(ds_copy["create_type"])
-            ds_obj.create_type = CreateType(ds_copy["create_type"])
+            dir_obj.create_type = CreateType(ds_copy["create_type"])
         except ValueError as e:
             print(e)
 
         dirs = {}
         for subdir_name, subdir in ds_copy["dirs"].items():
             # ds_copy["dirs"][subdir_name] = parse_dir_spec(subdir)
-            dirs[subdir_name] = parse_dir_spec(subdir, dir_obj)
+            dirs[subdir_name] = parse_dir_spec(subdir_name, subdir, dir_obj)
 
-        ds_obj.dirs = dirs
+        dir_obj.dirs = dirs
 
         files = {}
         for subfile_name, subfile in ds_copy["files"].items():
             # ds_copy["files"][subfile_name] = parse_file_spec(subfile)
-            files[subfile_name] = parse_file_spec(subfile, dir_obj)
+            files[subfile_name] = parse_file_spec(subfile_name, subfile, dir_obj)
 
-        ds_obj.files = files
+        dir_obj.files = files
 
         return dir_obj
 
@@ -132,7 +146,7 @@ def parse_dir_spec(
             print(e)
 
         try:
-            dir_obj = RemoteDirectory(**ds_copy, parent=parent)
+            dir_obj = RemoteDirectory(name, path=Path(name), **ds_copy, parent=parent)
         except TypeError as e:
             logging.error(
                 "Malformed remote dir spec: {}\nObject: {}".format(
@@ -169,13 +183,20 @@ def parse_dir_spec(
 #         download_remote_directory(dir_path, directory, level=level)
 
 
-def parse_file_spec(file_spec: dict, parent: Directory) -> Optional[File]:
+def parse_file_spec(name: str, file_spec: dict, parent: Directory) -> Optional[File]:
     fs_copy = copy.deepcopy(file_spec)
+    format_name = fs_copy.pop("format_name", None)
 
     file_obj: Optional[File] = None
 
     try:
-        file_obj = File(**fs_copy, parent=parent)
+        file_obj = File(
+            name=name,
+            path=Path(name),
+            **fs_copy,
+            format_name=format_name,
+            parent=parent,
+        )
     except TypeError as e:
         logging.error(
             "Malformed file spec: {}\nObject: {}".format(
@@ -209,22 +230,29 @@ def parse_file_spec(file_spec: dict, parent: Directory) -> Optional[File]:
     return file_obj
 
 
-def parse_datasource_file(file_path: Path) -> Optional[Dict[Any, Optional[Datasource]]]:
+def parse_datasource_file(
+    file_path: Path, data_context: DataContext
+) -> Optional[Dict[Any, Optional[Datasource]]]:
     datasources = {}
 
     if exists(file_path) and isfile(file_path):
         with open(file_path) as ds_file:
+            # try:
+            #     data_json = json.load(ds_file)
+            # except json.JSONDecodeError as e:
+            #     logging.error(
+            #         f"Provided datasource file ({file_path}) is not a JSON file, parse error follows: \n{e}"
+            #     )
+
+            #     return None
+
             try:
-                data_json = json.load(ds_file)
-            except json.JSONDecodeError as e:
-                logging.error(
-                    f"Provided datasource file ({file_path}) is not a JSON file, parse error follows: \n{e}"
-                )
+                data_yml = yaml.load(ds_file)
+            except Exception as e:
+                bp()
 
-                return None
-
-            for name, ds_json in data_json.items():
-                ds_spec = parse_datasource_spec(ds_json, None)
+            for name, ds_json in data_yml.items():
+                ds_spec = parse_datasource_spec(name, ds_json, None, data_context)
                 datasources[name] = ds_spec
 
     else:

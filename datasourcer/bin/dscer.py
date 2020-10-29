@@ -23,65 +23,85 @@ def process_args(args: argparse.Namespace):
     print(args)
 
     data_dst_path = Path(args.data_directory)
+    do_download = args.download
+    do_validate = args.validate
+    qualifier = args.qualifier
+    d_ctx = dscer.DataContext(root_path=data_dst_path)
 
-    datasources = {}
+    datasources: dscer.DataCollection = {}
 
-    def join_ds(fp, ds):
-        parsed_ds = dscer_marshall.parse_datasource_file(fp)
+    def join_ds_file(fp, ds, ctx):
+        parsed_ds = dscer_marshall.parse_datasource_file(fp, ctx)
+
         if parsed_ds is not None:
-            return {**ds, **parsed_ds}
+            # return {**ds, **parsed_ds}
+            return join_ds(ds, parsed_ds)
+
         else:
             return False
 
-    def apply_args(dst: dscer.DatasetType, args: argparse.Namespace):
-        if args.validate:
+    def join_ds(
+        d1: dscer.DataCollection, d2: dscer.DataCollection
+    ) -> dscer.DataCollection:
+        return {**d1, **d2}
+
+    def apply_args(dst: dscer.DatasetType, validate: bool, download: bool):
+        if validate:
             pass
 
-        if args.download:
+        if download:
             # download(dst, download_types=[])
-            dst.download()
+            dst.download(validate_existing=True, reload_unconfirmable=False)
 
     # grab any specified datasources
 
     # handle datasource_file
     if args.datasource_file is not None:
         ds_file_path = Path(args.datasource_file)
-        datasources = join_ds(ds_file_path, datasources)
+        datasources = join_ds_file(ds_file_path, datasources, d_ctx)
 
     # handle datasource dir
     if args.datasource_dir is not None:
-        ds_dir_path = Path(args.datasource_dir)
+        dir_dsources = dscer.datasources_from_dir(args.datasource_dir, data_dst_path)
 
-        if exists(ds_dir_path) and isdir(ds_dir_path):
-            ds_dir_files = glob(join(ds_dir_path, "*.json"))
-            logging.info(f"Found files in provided path: {ds_dir_files}")
+        if dir_dsources:
+            datasources = join_ds(dir_dsources, datasources)
 
-            for ds_file_path in ds_dir_files:
-                # = parse_datasource_file(ds_path)
-                datasources = join_ds(ds_file_path, datasources)
+        # ds_dir_path = Path(args.datasource_dir)
 
-        else:
-            logging.error(
-                f'Provided datasource file path does not exist or is not a file: "{ds_file_path}"'
-            )
-            return False
+        # if exists(ds_dir_path) and isdir(ds_dir_path):
+        #     ds_dir_files = glob(join(ds_dir_path, "*.yml"))
+        #     logging.info(f"Found files in provided path: {ds_dir_files}")
+
+        #     for ds_file_path in ds_dir_files:
+        #         # = parse_datasource_file(ds_path)
+        #         datasources = join_ds(ds_file_path, datasources, d_ctx)
+
+        #     print("have datasources")
+        #     bp()
+        # else:
+        #     logging.error(
+        #         f'Provided datasource file path does not exist or is not a file: "{ds_file_path}"'
+        #     )
+        #     return False
 
     if args.qualifier:
         retrieved = {}
 
-        for qualifier_arr in args.qualifier:
-            have_ret = dscer.retrieve_by_qualifier(qualifier_arr[0])
+        for qualifier_arr in qualifier:
+            have_ret = dscer.retrieve_by_qualifier(datasources, qualifier_arr[0])
             if have_ret:
-                name, ret = have_ret
-                retrieved[name] = ret
+                # name, ret = have_ret
+                # retrieved[name] = ret
+                retrieved[have_ret.name] = have_ret
             # TODO here
 
         for name, ret in retrieved.items():
-            apply_args(ret, args)
+            apply_args(ret, do_validate, do_download)
 
     else:
         for name, datasource in datasources.items():
-            apply_args(datasource, args)
+            apply_args(datasource, do_validate, do_download)
             # download_datasource(data_dst_path, datasource)
 
     # run the download code
