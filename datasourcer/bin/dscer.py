@@ -8,14 +8,6 @@ from pdb import set_trace as bp
 
 import datasourcer.datasourcer as dscer
 import datasourcer.marshalling as dscer_marshall
-from datasourcer.datasourcer import DatasetType
-
-# from ... import datasourcer as dscer
-# from ... import marshalling as dscer_marshall
-
-
-# import datasourcer as dscer
-# from datasourcer import DatasetType
 
 
 def process_args(args: argparse.Namespace):
@@ -24,7 +16,9 @@ def process_args(args: argparse.Namespace):
 
     data_dst_path = Path(args.data_directory)
     do_download = args.download
+    do_download_dynamic = args.download_dynamic
     do_validate = args.validate
+    do_process = args.process
     qualifier = args.qualifier
     d_ctx = dscer.DataContext(root_path=data_dst_path)
 
@@ -45,13 +39,38 @@ def process_args(args: argparse.Namespace):
     ) -> dscer.DataCollection:
         return {**d1, **d2}
 
-    def apply_args(dst: dscer.DatasetType, validate: bool, download: bool):
+    def apply_args(
+        dst: dscer.DatasetType, validate: bool, download: bool, process: bool
+    ):
         if validate:
             pass
 
         if download:
             # download(dst, download_types=[])
             dst.download(validate_existing=True, reload_unconfirmable=False)
+
+        if process:
+            dst.process()
+
+    def wrap_apply(
+        validate: bool, download: bool, process: bool, download_dynamic: bool
+    ):
+        def fn(tv: dscer.Traversable, depth=0):
+            if download_dynamic and isinstance(tv, dscer.DynamicResource):
+                if tv.can_download():
+                    tv.retrieve_snapshot()
+
+            elif download and isinstance(tv, dscer.Downloadable):
+                if tv.can_download():
+                    tv.download(level=depth)
+
+            if process and isinstance(tv, dscer.Processable):
+                if tv.can_process():
+                    tv.process()
+
+        return fn
+
+    apply_fn = wrap_apply(do_validate, do_download, do_process, do_download_dynamic)
 
     # grab any specified datasources
 
@@ -62,47 +81,28 @@ def process_args(args: argparse.Namespace):
 
     # handle datasource dir
     if args.datasource_dir is not None:
-        dir_dsources = dscer.datasources_from_dir(args.datasource_dir, data_dst_path)
+        dir_dsources = dscer_marshall.datasources_from_dir(
+            args.datasource_dir, data_dst_path
+        )
 
         if dir_dsources:
             datasources = join_ds(dir_dsources, datasources)
 
-        # ds_dir_path = Path(args.datasource_dir)
-
-        # if exists(ds_dir_path) and isdir(ds_dir_path):
-        #     ds_dir_files = glob(join(ds_dir_path, "*.yml"))
-        #     logging.info(f"Found files in provided path: {ds_dir_files}")
-
-        #     for ds_file_path in ds_dir_files:
-        #         # = parse_datasource_file(ds_path)
-        #         datasources = join_ds(ds_file_path, datasources, d_ctx)
-
-        #     print("have datasources")
-        #     bp()
-        # else:
-        #     logging.error(
-        #         f'Provided datasource file path does not exist or is not a file: "{ds_file_path}"'
-        #     )
-        #     return False
-
+    # if we have a qualifier, traverse & apply by it
     if args.qualifier:
         retrieved = {}
 
         for qualifier_arr in qualifier:
             have_ret = dscer.retrieve_by_qualifier(datasources, qualifier_arr[0])
             if have_ret:
-                # name, ret = have_ret
-                # retrieved[name] = ret
                 retrieved[have_ret.name] = have_ret
-            # TODO here
 
         for name, ret in retrieved.items():
-            apply_args(ret, do_validate, do_download)
+            ret.apply(apply_fn)
 
     else:
         for name, datasource in datasources.items():
-            apply_args(datasource, do_validate, do_download)
-            # download_datasource(data_dst_path, datasource)
+            datasource.apply(apply_fn)
 
     # run the download code
     # param_path = "../params/landfire.json"
@@ -141,6 +141,14 @@ def run():
     )
 
     parser.add_argument(
+        "-dld",
+        "--download_dynamic",
+        action="store_true",
+        help="Flag; if provided, all specified dynamic resources will be downloaded ('snapshots' of live resources)",
+        dest="download_dynamic",
+    )
+
+    parser.add_argument(
         "-v",
         "--validate",
         action="store_true",
@@ -150,6 +158,14 @@ def run():
 
     parser.add_argument(
         "-p",
+        "--process",
+        action="store_true",
+        help="Flag; if provided, directories and files will be processed",
+        dest="process",
+    )
+
+    parser.add_argument(
+        "-P",
         "--print_tree",
         action="store_true",
         help="Flag; if provided, will print the datasource trees after parsing",

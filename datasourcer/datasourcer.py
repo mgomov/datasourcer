@@ -8,7 +8,6 @@ import os
 import pprint
 import sys
 import time
-import zipfile
 from collections import deque, namedtuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -20,18 +19,18 @@ from pathlib import Path
 from pdb import set_trace as bp
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
+from zipfile import ZipFile
 
 import requests
 
-import marshalling as dscer_marshall
-
 logging.basicConfig(level=logging.INFO)
 
-# not a useful def here
+# not a useful def here (though does carry useful semantics
 # class DatasetType(str, Enum):
 #     ARCHIVE="ARCHIVE",
 #     LIVE="LIVE",
 #     ONGOING="ONGOING"
+
 
 # self-explanatory; various types of file formats
 class FileFormat(str, Enum):
@@ -44,6 +43,56 @@ class FileFormat(str, Enum):
     ARCGRID = ("ARCGRID",)
     SHAPEFILE = ("SHAPEFILE",)
     KML = ("KML",)
+
+
+class FileFormatProcessor:
+    def process(self, resource: "StaticResource") -> bool:
+        return False
+
+
+@dataclass
+class ZipfileProcessor(FileFormatProcessor):
+    unzip_dir: Path
+
+    def process(self, resource: "StaticResource") -> bool:
+        success = True
+
+        zf_path = resource.path
+        out_path = resource.build_parent_path() / self.unzip_dir
+
+        try:
+            with open(zf_path, "rb") as zf_bin:
+                zf = ZipFile(zf_bin)
+                zf.extractall(path=out_path)
+
+        except Exception as e:
+            print(f"Failed to unzip {resource} using {self}")
+            raise e
+
+        return success
+
+
+FileFormatToExtensionMap: Dict[FileFormat, str] = {
+    FileFormat.ZIP: "zip",
+    FileFormat.CSV: "csv",
+    FileFormat.GEOJSON: "geo.json",
+    FileFormat.JSON: "json",
+    FileFormat.ARCGRID: "grid",
+    FileFormat.SHAPEFILE: "shp",
+    FileFormat.KML: "kml",
+}
+
+
+# map of file formats to available processors
+FileFormatToProcessorMap: Dict[FileFormat, Optional[FileFormatProcessor]] = {
+    FileFormat.ZIP: ZipfileProcessor,
+    FileFormat.CSV: None,
+    FileFormat.GEOJSON: None,
+    FileFormat.JSON: None,
+    FileFormat.ARCGRID: None,
+    FileFormat.SHAPEFILE: None,
+    FileFormat.KML: None,
+}
 
 
 # file retrieval method
@@ -82,6 +131,15 @@ class DirectoryType(str, Enum):
     REMOTE = ("REMOTE",)
 
 
+class ResourceType(str, Enum):
+
+    # static resources, i.e. those that will not change after definition and retrieval; access time does not matter and will not influence the content
+    STATIC = "STATIC"
+
+    # dynamic resources, i.e. those that may change after retrieval; access time matters, and will dictate the content
+    DYNAMIC = "DYNAMIC"
+
+
 # necessary?
 # class DataRetrieveSpecType(str, Enum):
 #     DATASOURCE,
@@ -97,6 +155,15 @@ class Traversable:
     ) -> Optional["DatasetType"]:
         pass
 
+    def get_traversable_children(self):
+        pass
+
+    def apply(self, fn: Callable, depth=0):
+        fn(self, depth=depth)
+
+        for child in self.get_traversable_children():
+            child.apply(fn, depth=depth + 1)
+
     def build_parent_path(self) -> Path:
         pass
 
@@ -105,13 +172,25 @@ class Traversable:
 
 
 class Downloadable:
+    def can_download(self) -> bool:
+        pass
+
     def download(
         self,
         parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
+        name: Optional[Path] = None,
     ) -> bool:
+        pass
+
+
+class Processable:
+    def can_process(self) -> bool:
+        pass
+
+    def process(self) -> bool:
         pass
 
 
@@ -141,23 +220,27 @@ class DataContext:
 
 # these dataclass definitions also define the layout of the input datasource JSON files
 @dataclass
-class File(Traversable, Downloadable):
+class Resource(Traversable, Downloadable, Processable):
     name: str
-    format_name: Optional[str]
     file_type: FileFormat
     retrieve_type: RetrieveType
     source: Optional[str]
     path: Path
     description: Optional[str]
-    unzip: Optional[Path]
-    create_type: CreateType
-    retrieve: bool
-    retain: bool
-    template_types: Optional[List[TemplateType]]
-    parent: "Directory"
+    processor: FileFormatProcessor
+    # this should be part of a middleware or something
+    # unzip: Optional[Path]
+
+    # dynamic vs. static
+    # create_type: CreateType
+    # retrieve: bool
+    # retain: bool
+    # template_types: Optional[List[TemplateType]]
+    # parent: Union["Directory", "Subset"]
+    parent: "Subset"
 
     def __repr__(self):
-        return f'File("{self.name}", source: {self.source})'
+        return f'StaticResource("{self.name}", source: {self.source})'
 
     # No traversal precedence (no nested structures here)
     # TODO shouldn't be traversing past a file; if traverse_stack stil has elements, return error
@@ -172,12 +255,25 @@ class File(Traversable, Downloadable):
     def build_path(self) -> Path:
         return self.build_parent_path() / self.path
 
+    def get_traversable_children(self):
+        # resource has no traversable children (should it even be considered traversable?)
+        return []
+
+    def can_download(self) -> bool:
+        # a place to download from, a download method, and a place to put the download
+        return (
+            self.source is not None
+            and self.retrieve_type is not None
+            and self.path is not None
+        )
+
     def download(
         self,
         parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
-        reload_unconfirmable: bool = True,
+        reload_unconfirmable: bool = False,
+        name: Optional[Path] = None,
     ) -> bool:
         # downloads a file from the file spec into the file dictated by parent_dir + file_spec.path_name
         # returns True if a valid file is believed to exist, False otherwise
@@ -191,7 +287,15 @@ class File(Traversable, Downloadable):
         # ) -> bool:
         # logging.info("Downloading file \"{}\"".format('\t' * level, file_spec.path_name))
 
-        level_info('Downloading file "{}"'.format(self.path), level)
+        # handle default case for no-override filename
+        if name is None:
+            name = self.path
+
+        # handle default case for no-override parent path
+        if parent_dir is None:
+            parent_dir = self.build_parent_path()
+
+        level_info('Downloading file "{}"'.format(name), level)
 
         if self.retrieve_type == RetrieveType.GET:
             level_info("GET {}".format(self.source), level)
@@ -200,13 +304,10 @@ class File(Traversable, Downloadable):
                 level_info("No source specified; skipping file spec", level)
                 return False
 
-            if parent_dir is None:
-                parent_dir = self.build_parent_path()
-
             # make the directories leading up to this file, if they don't already exist
             os.makedirs(parent_dir, exist_ok=True)
 
-            file_path = Path(join(parent_dir, self.path))
+            file_path = Path(join(parent_dir, name))
 
             # request the headers here, with the accepted compression to be 'none' (so that chunking size lines up with content-length here)
             head = requests.head(
@@ -254,17 +355,44 @@ class File(Traversable, Downloadable):
 
 
 @dataclass
-class Directory(Traversable):
+class StaticResource(Resource):
+    name: str
+    path: Path
+
+
+@dataclass
+class DynamicResource(Resource):
+    name_prefix: str
+    extension: str
+
+    def can_download(self) -> bool:
+        # a place to download from, and a download method; path is determined by timestamp / fmt
+        return self.source is not None and self.retrieve_type is not None
+
+    def format_name(self, timestamp: datetime):
+        return (
+            f"{self.name_prefix}.{timestamp.strftime('%Y_%m_%d_%H%M')}.{self.extension}"
+        )
+
+    def retrieve_snapshot(self, parent_dir: Optional[Path] = None):
+        timestamp = datetime.now()
+
+        file_name = self.format_name(timestamp)
+
+        self.download(parent_dir=parent_dir, name=file_name)
+
+
+@dataclass
+class Subset(Traversable, Processable):
     name: str
     path: Path
     create_type: CreateType
-    dirs: Dict[str, "Directory"]
-    files: Dict[str, File]
-
-    parent: Union["Dataset", "Directory"]
+    subsets: Dict[str, "Subset"]
+    resources: Dict[str, StaticResource]
+    parent: Union["Dataset", "Subset"]
 
     def __repr__(self):
-        return f'Directory("{self.name}", Dirs: {list(self.dirs.keys())}, Files: {list(self.files.keys())})'
+        return f'Subset("{self.name}", Subsets: {list(self.subsets.keys())}, Resources: {list(self.resources.keys())})'
 
     def build_parent_path(self) -> Path:
         return self.parent.build_path()
@@ -283,7 +411,7 @@ class Directory(Traversable):
 
         target = traverse_stack.popleft()
 
-        have_file = check_dict(target, self.files, match_case=match_case)
+        have_file = check_dict(target, self.resources, match_case=match_case)
 
         # files can't traverse, so don't try (and if there's still something left in the traverse stack, skip it)
         if have_file and len(traverse_stack) == 0:
@@ -292,58 +420,80 @@ class Directory(Traversable):
             # don't try to traverse a file; fail safely and make the user specify
             return None
 
-        have_dir = check_dict(target, self.dirs, match_case=match_case)
+        have_dir = check_dict(target, self.subsets, match_case=match_case)
 
         if have_dir:
             return have_dir.traverse(traverse_stack, match_case=match_case)
 
         return None
 
-    def download(
-        self,
-        parent_dir: Optional[Path] = None,
-        level: int = 0,
-        validate_existing: bool = True,
-        reload_unconfirmable: bool = True,
-    ) -> None:
-        if parent_dir is None:
-            parent_dir = self.build_parent_path()
+    def get_traversable_children(self) -> List[Traversable]:
+        children: List[Traversable] = []
 
-        dir_path = Path(join(parent_dir, self.path))
+        for subset_name, subset in self.subsets.items():
+            children.append(subset)
 
-        for subdir_name, subdir in self.dirs.items():
-            # download_directory(dir_path, subdir, level=level + 1)
-            try:
-                subdir.download(
-                    level=level + 1,
-                    validate_existing=validate_existing,
-                    reload_unconfirmable=reload_unconfirmable,
-                )
-            except TypeError as e:
-                print(e)
-                bp()
+        for subresource_name, subresource in self.resources.items():
+            children.append(subresource)
 
-        for subfile_name, subfile in self.files.items():
-            # download_file(dir_path, subfile, level=level + 1)
-            subfile.download(
-                dir_path,
-                level=level + 1,
-                validate_existing=validate_existing,
-                reload_unconfirmable=reload_unconfirmable,
-            )
+        return children
+
+    # def download(
+    #     self,
+    #     parent_dir: Optional[Path] = None,
+    #     level: int = 0,
+    #     validate_existing: bool = True,
+    #     reload_unconfirmable: bool = True,
+    #     name: Optional[str] = None,
+    # ) -> None:
+    #     if parent_dir is None:
+    #         parent_dir = self.build_parent_path()
+
+    #     dir_path = Path(join(parent_dir, self.path))
+
+    #     for subdir_name, subdir in self.subsets.items():
+    #         # download_directory(dir_path, subdir, level=level + 1)
+    #         try:
+    #             subdir.download(
+    #                 level=level + 1,
+    #                 validate_existing=validate_existing,
+    #                 reload_unconfirmable=reload_unconfirmable,
+    #             )
+    #         except TypeError as e:
+    #             print(e)
+    #             bp()
+
+    #     for subfile_name, subfile in self.resources.items():
+    #         # download_file(dir_path, subfile, level=level + 1)
+    #         subfile.download(
+    #             dir_path,
+    #             level=level + 1,
+    #             validate_existing=validate_existing,
+    #             reload_unconfirmable=reload_unconfirmable,
+    #         )
+
+    def get_file_by_index(self, index):
+        filenames = list(self.resources.keys())
+
+        try:
+            key = filenames[index]
+        except IndexError as e:
+            return None
+
+        obj = self.resources.get(key)
+
+        return obj
 
 
 @dataclass
-class RemoteDirectory(Traversable):
+class RemoteSubset(Subset):
     name: str
     path: Path
     retrieve_type: RetrieveType
     source: str
 
-    parent: Union["Dataset", Directory]
-
     def __repr__(self):
-        return f'RemoteDirectory("{self.name}", source: self.source)'
+        return f'RemoteSubset("{self.name}", source: self.source)'
 
     def build_parent_path(self) -> Path:
         return self.parent.build_path()
@@ -362,12 +512,17 @@ class RemoteDirectory(Traversable):
             # can't (yet) request a subfile for a remote directory
             return None
 
+    def get_traversable_children(self) -> List[Traversable]:
+        # remote subset has no children, as it's self-contained
+        return []
+
     def download(
         self,
         parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
+        name: Optional[Path] = None,
     ) -> None:
         # download_remote_directory(dir_path, directory, level=level)
         # def download_remote_directory(
@@ -442,11 +597,11 @@ class RemoteDirectory(Traversable):
 
 
 @dataclass
-class Dataset(Traversable):
+class Dataset(Traversable, Downloadable, Processable):
     name: str
     path: Path
     description: Optional[str]
-    org: Directory
+    org: Subset
 
     parent: "Datasource"
 
@@ -466,12 +621,17 @@ class Dataset(Traversable):
         # forward the traversal to the (org)anization of the dataset (i.e. the dir)
         return self.org.traverse(traverse_stack, match_case=match_case)
 
+    def get_traversable_children(self) -> List[Traversable]:
+        # only 1 traversable child; the org subset
+        return [self.org]
+
     def download(
         self,
         parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
+        name: Optional[Path] = None,
     ):
         # def download_dataset(parent_dir: Path, dataset: Dataset, level: int = 1):
 
@@ -494,7 +654,7 @@ class Dataset(Traversable):
 
 
 @dataclass
-class Datasource(Traversable):
+class Datasource(Traversable, Downloadable, Processable):
     name: str
     path: Path
     description: Optional[str]
@@ -514,7 +674,8 @@ class Datasource(Traversable):
             return self.data_context.root_path
 
         elif self.parent is not None:
-            return self.build_parent_path()
+            # return self.build_parent_path()
+            return self.parent.build_path()
 
     def build_path(self):
         return self.build_parent_path() / self.path
@@ -544,12 +705,24 @@ class Datasource(Traversable):
 
         return None
 
+    def get_traversable_children(self) -> List[Traversable]:
+        children = []
+
+        for subsource_name, subsource in self.datasources.items():
+            children.append(subsource)
+
+        for dataset_name, dataset in self.datasets.items():
+            children.append(dataset)
+
+        return children
+
     def download(
         self,
         parent_dir: Optional[Path] = None,
         level: int = 0,
         validate_existing: bool = True,
         reload_unconfirmable: bool = True,
+        name: Optional[Path] = None,
     ):
         if parent_dir is None:
             parent_dir = self.build_parent_path()
@@ -577,7 +750,7 @@ class Datasource(Traversable):
             )
 
 
-DatasetType = Union[Datasource, Dataset, Directory, RemoteDirectory, File]
+DatasetType = Union[Datasource, Dataset, Subset, RemoteSubset, StaticResource]
 DataCollection = Dict[str, DatasetType]
 
 
@@ -794,35 +967,7 @@ def retrieve_by_qualifier(
     # name, retrieved = have_first.traverse(qual_stack, match_case=match_case)
     retrieved = have_first.traverse(qual_stack, match_case=match_case)
 
-    print("retrieved:", retrieved)
-    bp()
+    # print("retrieved:", retrieved)
+    # bp()
 
     return retrieved
-
-
-def datasources_from_dir(ds_dir: Path, data_dir: Path) -> Optional[DataCollection]:
-    def join_ds(fp, ds, ctx):
-        parsed_ds = dscer_marshall.parse_datasource_file(fp, ctx)
-
-        if parsed_ds is not None:
-            return {**ds, **parsed_ds}
-        else:
-            return False
-
-    d_ctx = DataContext(root_path=data_dir)
-
-    if exists(ds_dir) and isdir(ds_dir):
-        ds_dir_files = glob(join(ds_dir, "*.yml"))
-        logging.info(f"Found files in provided path: {ds_dir_files}")
-
-        for ds_file_path in ds_dir_files:
-            # = parse_datasource_file(ds_path)
-            datasources = join_ds(ds_file_path, datasources, d_ctx)
-
-        print("have datasources")
-        bp()
-    else:
-        logging.error(
-            f'Provided datasource file path does not exist or is not a file: "{ds_file_path}"'
-        )
-        return False

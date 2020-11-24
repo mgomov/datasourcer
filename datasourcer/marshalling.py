@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import pprint
+from glob import glob
 from os.path import (abspath, basename, dirname, exists, getsize, isdir,
                      isfile, join)
 from pathlib import Path
@@ -12,11 +13,11 @@ from urllib.parse import urlparse
 # import pyyaml
 import yaml
 
-import datasourcer.datasourcer as dscer
-from datasourcer.datasourcer import (CreateType, DataContext, Dataset,
-                                     Datasource, Directory, DirectoryType,
-                                     File, FileFormat, RemoteDirectory,
-                                     RetrieveType)
+from .datasourcer import (CreateType, DataCollection, DataContext, Dataset,
+                          Datasource, DirectoryType, DynamicResource,
+                          FileFormat, FileFormatProcessor,
+                          FileFormatToExtensionMap, RemoteSubset, Resource,
+                          RetrieveType, StaticResource, Subset)
 
 
 def parse_datasource_spec(
@@ -26,7 +27,7 @@ def parse_datasource_spec(
     ds_copy = copy.deepcopy(ds_spec)
 
     try:
-        ds_obj = dscer.Datasource(
+        ds_obj = Datasource(
             name=name,
             path=Path(name),
             **ds_copy,
@@ -56,7 +57,7 @@ def parse_datasource_spec(
             subsource_name, subsource_spec, ds_obj, data_context
         )
 
-        ds_obj.datasources = datasources
+    ds_obj.datasources = datasources
 
     return ds_obj
 
@@ -75,18 +76,20 @@ def parse_dataset_spec(name: str, ds_spec: dict, parent: Datasource):
 
         return None
 
+    # bp()
     # ds_copy["org"] = parse_dir_spec(ds_copy["org"])
-    ds_obj.org = parse_dir_spec("data", ds_copy["org"], ds_obj)
+    ds_obj.org = parse_subset_spec("data", ds_copy["org"], ds_obj)
+    # bp()
 
     return ds_obj
 
 
-def parse_dir_spec(
-    name: str, dir_spec: dict, parent: Union[Dataset, Directory]
-) -> Union[None, Directory, RemoteDirectory]:
+def parse_subset_spec(
+    name: str, dir_spec: dict, parent: Union[Dataset, Subset]
+) -> Union[None, Subset, RemoteSubset]:
     ds_copy = copy.deepcopy(dir_spec)
 
-    dir_obj: Union[None, Directory, RemoteDirectory] = None
+    dir_obj: Union[None, Subset, RemoteSubset] = None
 
     try:
         ds_type = DirectoryType(ds_copy["type"])
@@ -94,17 +97,18 @@ def parse_dir_spec(
         ds_copy.pop("type", None)
     except ValueError as e:
         logging.error(
-            f"Directory type not specified or invalid (type string: '{ds_copy['type']}')"
+            f"Subset type not specified or invalid (type string: '{ds_copy['type']}')"
         )
         return None
     except KeyError as e:
         bp()
 
+    # bp()
     # if set(ds_copy.keys()) == set(Directory.__annotations__):
     if ds_type == DirectoryType.LOCAL:
 
         try:
-            dir_obj = Directory(name=name, path=Path(name), **ds_copy, parent=parent)
+            dir_obj = Subset(name=name, path=Path(name), **ds_copy, parent=parent)
         except TypeError as e:
             logging.error(
                 "Malformed dir spec: {}\nObject: {}".format(
@@ -114,25 +118,19 @@ def parse_dir_spec(
 
             return None
 
-        try:
-            # ds_copy["create_type"] = CreateType(ds_copy["create_type"])
-            dir_obj.create_type = CreateType(ds_copy["create_type"])
-        except ValueError as e:
-            print(e)
+        subsets = {}
+        for subdir_name, subdir in ds_copy["subsets"].items():
+            subsets[subdir_name] = parse_subset_spec(subdir_name, subdir, dir_obj)
 
-        dirs = {}
-        for subdir_name, subdir in ds_copy["dirs"].items():
-            # ds_copy["dirs"][subdir_name] = parse_dir_spec(subdir)
-            dirs[subdir_name] = parse_dir_spec(subdir_name, subdir, dir_obj)
+        dir_obj.subsets = subsets
 
-        dir_obj.dirs = dirs
+        resources = {}
+        for subfile_name, subfile in ds_copy["resources"].items():
+            resources[subfile_name] = parse_resource_spec(
+                subfile_name, subfile, dir_obj
+            )
 
-        files = {}
-        for subfile_name, subfile in ds_copy["files"].items():
-            # ds_copy["files"][subfile_name] = parse_file_spec(subfile)
-            files[subfile_name] = parse_file_spec(subfile_name, subfile, dir_obj)
-
-        dir_obj.files = files
+        dir_obj.resources = resources
 
         return dir_obj
 
@@ -146,7 +144,16 @@ def parse_dir_spec(
             print(e)
 
         try:
-            dir_obj = RemoteDirectory(name, path=Path(name), **ds_copy, parent=parent)
+            # bp()
+            dir_obj = RemoteSubset(
+                name=name,
+                path=Path(name),
+                # TODO these should be handled later
+                subsets=None,
+                resources=None,
+                **ds_copy,
+                parent=parent,
+            )
         except TypeError as e:
             logging.error(
                 "Malformed remote dir spec: {}\nObject: {}".format(
@@ -183,20 +190,74 @@ def parse_dir_spec(
 #         download_remote_directory(dir_path, directory, level=level)
 
 
-def parse_file_spec(name: str, file_spec: dict, parent: Directory) -> Optional[File]:
-    fs_copy = copy.deepcopy(file_spec)
-    format_name = fs_copy.pop("format_name", None)
+def parse_processor_spec(proc_spec: dict) -> Optional[FileFormatProcessor]:
+    return None
 
-    file_obj: Optional[File] = None
+
+def parse_resource_spec(
+    name: str, file_spec: dict, parent: Subset
+) -> Optional[Resource]:
+    fs_copy = copy.deepcopy(file_spec)
+
+    # pop out all of the attributes that will need to be separately processed; after this, only POJOs that get passed directly to the resource ctor should remain
+    format_name = fs_copy.pop("format_name", None)
+    process_spec = fs_copy.pop("process", None)
+    file_type = fs_copy.pop("file_type", None)
+    retrieve_type = fs_copy.pop("retrieve_type", None)
+    create_type = fs_copy.pop("create_type", None)
+    template_name = fs_copy.pop("template_name", None)
+    name_prefix = fs_copy.pop("name_prefix", None)
+    # TODO handle
+    retrieve = fs_copy.pop("retrieve", None)
+    retain = fs_copy.pop("retain", None)
+    template_types = fs_copy.pop("template_types", None)
+    unzip = fs_copy.pop("unzip", None)
+
+    processor = parse_processor_spec(process_spec)
 
     try:
-        file_obj = File(
-            name=name,
-            path=Path(name),
-            **fs_copy,
-            format_name=format_name,
-            parent=parent,
-        )
+        # fs_copy["file_type"] = FileFormat(fs_copy["file_type"])
+        # fs_copy["retrieve_type"] = RetrieveType(fs_copy["retrieve_type"])
+        # fs_copy["create_type"] = CreateType(fs_copy["create_type"])
+        file_type_ret = FileFormat(file_type)
+        retrieve_type_ret = RetrieveType(retrieve_type)
+        create_type_ret = CreateType(create_type)
+
+    except ValueError as e:
+        print(e)
+        bp()
+        raise e
+
+    extension_ret = FileFormatToExtensionMap.get(file_type_ret, "UNK")
+
+    file_obj: Optional[Resource] = None
+
+    try:
+        if create_type == CreateType.STATIC:
+            file_obj = StaticResource(
+                name=name,
+                path=Path(name),
+                **fs_copy,
+                parent=parent,
+                processor=processor,
+                # create_type=create_type_ret,
+                file_type=file_type_ret,
+                retrieve_type=retrieve_type_ret,
+            )
+        elif create_type == CreateType.DYNAMIC:
+            file_obj = DynamicResource(
+                # TODO this abstraction doesn't seem correct
+                name=None,
+                path=None,
+                name_prefix=name_prefix,
+                extension=extension_ret,
+                **fs_copy,
+                parent=parent,
+                processor=processor,
+                # create_type=create_type_ret,
+                file_type=file_type_ret,
+                retrieve_type=retrieve_type_ret,
+            )
     except TypeError as e:
         logging.error(
             "Malformed file spec: {}\nObject: {}".format(
@@ -204,20 +265,10 @@ def parse_file_spec(name: str, file_spec: dict, parent: Directory) -> Optional[F
             )
         )
 
+        raise e
         return None
 
-    try:
-        # fs_copy["file_type"] = FileFormat(fs_copy["file_type"])
-        # fs_copy["retrieve_type"] = RetrieveType(fs_copy["retrieve_type"])
-        # fs_copy["create_type"] = CreateType(fs_copy["create_type"])
-        file_obj.file_type = FileFormat(fs_copy["file_type"])
-        file_obj.retrieve_type = RetrieveType(fs_copy["retrieve_type"])
-        file_obj.create_type = CreateType(fs_copy["create_type"])
-
-    except ValueError as e:
-        print(e)
-
-    if fs_copy["retrieve_type"] == RetrieveType.GET:
+    if retrieve_type_ret == RetrieveType.GET:
         url_check = urlparse(fs_copy["source"])
         if len(url_check.scheme) == 0 or len(url_check.netloc) == 0:
             logging.error(
@@ -261,5 +312,38 @@ def parse_datasource_file(
             f'Provided datasource file path does not exist or is not a file: "{file_path}"'
         )
         return None
+
+    return datasources
+
+
+def datasources_from_dir(ds_dir: Path, data_dir: Path) -> Optional[DataCollection]:
+
+    datasources = {}
+
+    def join_ds(fp, ds, ctx):
+        parsed_ds = parse_datasource_file(fp, ctx)
+
+        if parsed_ds is not None:
+            return {**ds, **parsed_ds}
+        else:
+            return False
+
+    d_ctx = DataContext(root_path=data_dir)
+
+    if exists(ds_dir) and isdir(ds_dir):
+        ds_dir_files = glob(join(ds_dir, "*.yml"))
+        logging.info(f"Found files in provided path({ds_dir}): {ds_dir_files}")
+
+        for ds_file_path in ds_dir_files:
+            # = parse_datasource_file(ds_path)
+            datasources = join_ds(ds_file_path, datasources, d_ctx)
+
+        # print("have datasources")
+        # bp()
+    else:
+        logging.error(
+            f'Provided datasource file path does not exist or is not a file: "{ds_file_path}"'
+        )
+        return False
 
     return datasources
