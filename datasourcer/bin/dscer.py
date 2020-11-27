@@ -60,7 +60,11 @@ def process_args(args: argparse.Namespace):
                 if tv.can_download():
                     tv.retrieve_snapshot()
 
-            elif download and isinstance(tv, dscer.Downloadable):
+            if (
+                download
+                and isinstance(tv, dscer.Downloadable)
+                and not isinstance(tv, dscer.DynamicResource)
+            ):
                 if tv.can_download():
                     tv.download(level=depth)
 

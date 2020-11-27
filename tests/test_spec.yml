@@ -1,0 +1,17 @@
+TEST:
+  description: 'Testing dataset; please ignore'
+
+  datasets:
+    test_dataset:
+      description: 'TEST.test_dataset (datasource.dataset)'
+      org:
+        type: LOCAL
+        create_type: STATIC
+        
+      
+
+  datasources:
+    test_datasource:
+      description: 'TEST.test_datasource (datasource.datasource)'
+
+      datasets:

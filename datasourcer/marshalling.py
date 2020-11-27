@@ -206,7 +206,6 @@ def parse_resource_spec(
     retrieve_type = fs_copy.pop("retrieve_type", None)
     create_type = fs_copy.pop("create_type", None)
     template_name = fs_copy.pop("template_name", None)
-    name_prefix = fs_copy.pop("name_prefix", None)
     # TODO handle
     retrieve = fs_copy.pop("retrieve", None)
     retain = fs_copy.pop("retain", None)
@@ -247,9 +246,8 @@ def parse_resource_spec(
         elif create_type == CreateType.DYNAMIC:
             file_obj = DynamicResource(
                 # TODO this abstraction doesn't seem correct
-                name=None,
+                name=name,
                 path=None,
-                name_prefix=name_prefix,
                 extension=extension_ret,
                 **fs_copy,
                 parent=parent,
@@ -258,6 +256,7 @@ def parse_resource_spec(
                 file_type=file_type_ret,
                 retrieve_type=retrieve_type_ret,
             )
+
     except TypeError as e:
         logging.error(
             "Malformed file spec: {}\nObject: {}".format(

@@ -198,10 +198,6 @@ class TemplateType(str, Enum):
     DATETIME = "DATETIME"
 
 
-def datasource_repr(self):
-    return pprint.pformat(self._asdict(), indent=1)
-
-
 def check_dict(key: str, d: Dict[str, Any], match_case: bool = False) -> Optional[Any]:
     dict_set = {k.lower() if not match_case else k: k for k in d}
 
@@ -360,10 +356,50 @@ class StaticResource(Resource):
     path: Path
 
 
+Snapshot = Tuple[datetime, Path]
+
+
 @dataclass
 class DynamicResource(Resource):
-    name_prefix: str
     extension: str
+
+    # information about the resource
+    snapshots: List[Snapshot] = field(init=False)
+
+    date_fmt: str = "%Y_%m_%d_%H%M"
+
+    def __repr__(self):
+        return f'DynamicResource("{self.name}", source: {self.source})'
+
+    def __post_init__(self):
+        self.update_snapshots()
+
+    def find_snapshots(self) -> List[Snapshot]:
+        scan_dir = self.build_parent_path()
+
+        def parse_datetime(path):
+            return datetime.strptime(path.split(".")[1], self.date_fmt)
+
+        for root, dirs, files in os.walk(scan_dir):
+            snapshots = [
+                (parse_datetime(filename), Path(filename))
+                for filename in filter(lambda x: self.name in x, files)
+            ]
+
+        snapshots.sort(key=lambda a: a[0])
+
+        return snapshots
+
+    def update_snapshots(self) -> List[Snapshot]:
+        self.snapshots = self.find_snapshots()
+
+        return self.snapshots
+
+    def get_latest_snapshot(self) -> Optional[Snapshot]:
+        if len(self.snapshots) > 0:
+            return self.snapshots[-1]
+
+        return None
 
     def can_download(self) -> bool:
         # a place to download from, and a download method; path is determined by timestamp / fmt
@@ -371,15 +407,32 @@ class DynamicResource(Resource):
 
     def format_name(self, timestamp: datetime):
         return (
-            f"{self.name_prefix}.{timestamp.strftime('%Y_%m_%d_%H%M')}.{self.extension}"
+            f"{self.name_prefix}.{timestamp.strftime(self.date_fmt)}.{self.extension}"
         )
 
-    def retrieve_snapshot(self, parent_dir: Optional[Path] = None):
+    # returns a snapshot, if one was retrieved (i.e. if there was a new snapshot to retrieve)
+    def retrieve_snapshot(
+        self, parent_dir: Optional[Path] = None
+    ) -> Optional[Snapshot]:
         timestamp = datetime.now()
 
         file_name = self.format_name(timestamp)
 
-        self.download(parent_dir=parent_dir, name=file_name)
+        # grab prior latest for comparison
+        old_latest = self.get_latest_snapshot()
+
+        # retrieve new snapshot and update snapshots, for comparing against old_latest
+        snapshot = self.download(parent_dir=parent_dir, name=file_name)
+        self.update_snapshots()
+        latest = self.get_latest_snapshot()
+
+        # if a new snapshot was downloaded, return it
+        if old_latest[0] != latest[0]:
+            return latest
+
+        # TODO also do diffing/hashing of content? for validating 'newness' of snapshots, maybe behind a flag
+
+        return None
 
 
 @dataclass
@@ -952,7 +1005,7 @@ def retrieve_by_qualifier(
     qual_parts = qualifier.split(delimiter)
     qual_stack = deque(qual_parts)
 
-    print(qual_parts, qual_stack)
+    # print(qual_parts, qual_stack)
 
     first = qual_stack.popleft()
 
