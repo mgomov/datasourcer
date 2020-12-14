@@ -20,6 +20,7 @@ def process_args(args: argparse.Namespace):
     do_validate = args.validate
     do_process = args.process
     qualifier = args.qualifier
+    bpt = args.breakpt
     d_ctx = dscer.DataContext(root_path=data_dst_path)
 
     datasources: dscer.DataCollection = {}
@@ -62,7 +63,10 @@ def process_args(args: argparse.Namespace):
 
             if (
                 download
-                and isinstance(tv, dscer.Downloadable)
+                and (
+                    isinstance(tv, dscer.Downloadable)
+                    or isinstance(tv, dscer.RemoteSubset)
+                )
                 and not isinstance(tv, dscer.DynamicResource)
             ):
                 if tv.can_download():
@@ -107,6 +111,9 @@ def process_args(args: argparse.Namespace):
     else:
         for name, datasource in datasources.items():
             datasource.apply(apply_fn)
+
+    if bpt:
+        bp()
 
     # run the download code
     # param_path = "../params/landfire.json"
@@ -218,6 +225,14 @@ def run():
         nargs="*",
         action="append",
         dest="qualifier",
+    )
+
+    parser.add_argument(
+        "-bp",
+        "--breakpoint",
+        help="Trigger a PDB breakpoint after parsing is complete.",
+        action="store_true",
+        dest="breakpt",
     )
 
     args = parser.parse_args()

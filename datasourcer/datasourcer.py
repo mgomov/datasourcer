@@ -201,7 +201,7 @@ class TemplateType(str, Enum):
 def check_dict(key: str, d: Dict[str, Any], match_case: bool = False) -> Optional[Any]:
     dict_set = {k.lower() if not match_case else k: k for k in d}
 
-    check = dict_set.get(key)
+    check = dict_set.get(key.lower() if not match_case else key)
 
     if check is not None:
         return d.get(check)
@@ -227,12 +227,6 @@ class Resource(Traversable, Downloadable, Processable):
     # this should be part of a middleware or something
     # unzip: Optional[Path]
 
-    # dynamic vs. static
-    # create_type: CreateType
-    # retrieve: bool
-    # retain: bool
-    # template_types: Optional[List[TemplateType]]
-    # parent: Union["Directory", "Subset"]
     parent: "Subset"
 
     def __repr__(self):
@@ -271,17 +265,6 @@ class Resource(Traversable, Downloadable, Processable):
         reload_unconfirmable: bool = False,
         name: Optional[Path] = None,
     ) -> bool:
-        # downloads a file from the file spec into the file dictated by parent_dir + file_spec.path_name
-        # returns True if a valid file is believed to exist, False otherwise
-        # def download_file(
-        #     parent_dir: Path,
-        #     file_spec: File,
-        #     level: int = 0,
-        #     check_exist: bool = True,
-        #     validate_existing_file: bool = True,
-        #     reload_unconfirmable: bool = False,
-        # ) -> bool:
-        # logging.info("Downloading file \"{}\"".format('\t' * level, file_spec.path_name))
 
         # handle default case for no-override filename
         if name is None:
@@ -380,9 +363,11 @@ class DynamicResource(Resource):
         def parse_datetime(path):
             return datetime.strptime(path.split(".")[1], self.date_fmt)
 
+        this_path = self.build_parent_path()
+
         for root, dirs, files in os.walk(scan_dir):
             snapshots = [
-                (parse_datetime(filename), Path(filename))
+                (parse_datetime(filename), this_path / Path(filename))
                 for filename in filter(lambda x: self.name in x, files)
             ]
 
@@ -406,11 +391,10 @@ class DynamicResource(Resource):
         return self.source is not None and self.retrieve_type is not None
 
     def format_name(self, timestamp: datetime):
-        return (
-            f"{self.name_prefix}.{timestamp.strftime(self.date_fmt)}.{self.extension}"
-        )
+        return f"{self.name}.{timestamp.strftime(self.date_fmt)}.{self.extension}"
 
     # returns a snapshot, if one was retrieved (i.e. if there was a new snapshot to retrieve)
+    # this should raise exception on failure? maybe DL should as well, and this should just pass it up
     def retrieve_snapshot(
         self, parent_dir: Optional[Path] = None
     ) -> Optional[Snapshot]:
@@ -422,12 +406,12 @@ class DynamicResource(Resource):
         old_latest = self.get_latest_snapshot()
 
         # retrieve new snapshot and update snapshots, for comparing against old_latest
-        snapshot = self.download(parent_dir=parent_dir, name=file_name)
+        snapshot_file = self.download(parent_dir=parent_dir, name=file_name)
         self.update_snapshots()
         latest = self.get_latest_snapshot()
 
         # if a new snapshot was downloaded, return it
-        if old_latest[0] != latest[0]:
+        if old_latest is None or old_latest[0] != latest[0]:
             return latest
 
         # TODO also do diffing/hashing of content? for validating 'newness' of snapshots, maybe behind a flag
@@ -469,8 +453,12 @@ class Subset(Traversable, Processable):
         # files can't traverse, so don't try (and if there's still something left in the traverse stack, skip it)
         if have_file and len(traverse_stack) == 0:
             return have_file
-        elif len(traverse_stack) > 0:
+
+        elif have_file and len(traverse_stack) > 0:
             # don't try to traverse a file; fail safely and make the user specify
+            logging.error(
+                f"Can't traverse a file ({have_file}), attempting: {traverse_stack}."
+            )
             return None
 
         have_dir = check_dict(target, self.subsets, match_case=match_case)
@@ -491,41 +479,7 @@ class Subset(Traversable, Processable):
 
         return children
 
-    # def download(
-    #     self,
-    #     parent_dir: Optional[Path] = None,
-    #     level: int = 0,
-    #     validate_existing: bool = True,
-    #     reload_unconfirmable: bool = True,
-    #     name: Optional[str] = None,
-    # ) -> None:
-    #     if parent_dir is None:
-    #         parent_dir = self.build_parent_path()
-
-    #     dir_path = Path(join(parent_dir, self.path))
-
-    #     for subdir_name, subdir in self.subsets.items():
-    #         # download_directory(dir_path, subdir, level=level + 1)
-    #         try:
-    #             subdir.download(
-    #                 level=level + 1,
-    #                 validate_existing=validate_existing,
-    #                 reload_unconfirmable=reload_unconfirmable,
-    #             )
-    #         except TypeError as e:
-    #             print(e)
-    #             bp()
-
-    #     for subfile_name, subfile in self.resources.items():
-    #         # download_file(dir_path, subfile, level=level + 1)
-    #         subfile.download(
-    #             dir_path,
-    #             level=level + 1,
-    #             validate_existing=validate_existing,
-    #             reload_unconfirmable=reload_unconfirmable,
-    #         )
-
-    def get_file_by_index(self, index):
+    def get_resource_by_index(self, index: int) -> Optional[Resource]:
         filenames = list(self.resources.keys())
 
         try:
@@ -537,9 +491,14 @@ class Subset(Traversable, Processable):
 
         return obj
 
+    def get_resource_by_name(self, name: str) -> Optional[Resource]:
+        obj = self.resources.get(name)
+
+        return obj
+
 
 @dataclass
-class RemoteSubset(Subset):
+class RemoteSubset(Subset, Downloadable):
     name: str
     path: Path
     retrieve_type: RetrieveType
@@ -569,6 +528,10 @@ class RemoteSubset(Subset):
         # remote subset has no children, as it's self-contained
         return []
 
+    def can_download(self) -> bool:
+        # TODO some remote logic e.g. checking FTP server for existence of this resource / subset?
+        return True
+
     def download(
         self,
         parent_dir: Optional[Path] = None,
@@ -587,7 +550,7 @@ class RemoteSubset(Subset):
         # ) -> None:
 
         if parent_dir is None:
-            parent_dir = self.build_parent_path()
+            parent_dir = self.build_path()
 
         if self.retrieve_type == RetrieveType.GET:
             level_error("Retrieve type GET not impl.; object: {}".format(self), level)
@@ -803,7 +766,9 @@ class Datasource(Traversable, Downloadable, Processable):
             )
 
 
-DatasetType = Union[Datasource, Dataset, Subset, RemoteSubset, StaticResource]
+DatasetType = Union[
+    Datasource, Dataset, Subset, RemoteSubset, Resource, StaticResource, DynamicResource
+]
 DataCollection = Dict[str, DatasetType]
 
 

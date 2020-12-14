@@ -29,7 +29,7 @@ def parse_datasource_spec(
     try:
         ds_obj = Datasource(
             name=name,
-            path=Path(name),
+            path=Path(str(name)),
             **ds_copy,
             parent=parent,
             data_context=data_context,
@@ -66,7 +66,7 @@ def parse_dataset_spec(name: str, ds_spec: dict, parent: Datasource):
     ds_copy = copy.deepcopy(ds_spec)
 
     try:
-        ds_obj = Dataset(name=name, path=Path(name), **ds_copy, parent=parent)
+        ds_obj = Dataset(name=name, path=Path(str(name)), **ds_copy, parent=parent)
     except TypeError as e:
         logging.error(
             "Malformed dataset spec: {}\nObject: {}".format(
@@ -108,7 +108,7 @@ def parse_subset_spec(
     if ds_type == DirectoryType.LOCAL:
 
         try:
-            dir_obj = Subset(name=name, path=Path(name), **ds_copy, parent=parent)
+            dir_obj = Subset(name=name, path=Path(str(name)), **ds_copy, parent=parent)
         except TypeError as e:
             logging.error(
                 "Malformed dir spec: {}\nObject: {}".format(
@@ -147,7 +147,7 @@ def parse_subset_spec(
             # bp()
             dir_obj = RemoteSubset(
                 name=name,
-                path=Path(name),
+                path=Path(str(name)),
                 # TODO these should be handled later
                 subsets=None,
                 resources=None,
@@ -235,7 +235,7 @@ def parse_resource_spec(
         if create_type == CreateType.STATIC:
             file_obj = StaticResource(
                 name=name,
-                path=Path(name),
+                path=Path(str(name)),
                 **fs_copy,
                 parent=parent,
                 processor=processor,
